@@ -1,0 +1,65 @@
+name: Build EPS QuickLook
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the EPS decoder
+        run: |
+          mkdir -p build
+          swiftc -O -o build/decoder-test Sources/Shared/EPSDecoder.swift Tests/main.swift
+          build/decoder-test Tests/Fixtures
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (Apple Silicon + Intel)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project EPSQuickLook.xcodeproj \
+            -scheme EPSQuickLook \
+            -configuration Release \
+            -derivedDataPath build/dd \
+            ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Sign
+        run: bash scripts/sign.sh "build/dd/Build/Products/Release/EPSQuickLook.app"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "build/dd/Build/Products/Release/EPSQuickLook.app" dist/EPSQuickLook.zip
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EPSQuickLook
+          path: dist/EPSQuickLook.zip
+
+      - name: Publish as the "latest" release
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/EPSQuickLook.zip \
+            --title "EPS QuickLook（最新版 build ${{ github.run_number }}）" \
+            --notes "ダウンロードして展開し、EPSQuickLook.app をアプリケーションフォルダに入れてください。手順は README を参照。" \
+            --target "${{ github.sha }}"
